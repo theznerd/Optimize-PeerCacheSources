@@ -38,6 +38,14 @@ that you want to ensure a minimum number of Peer Cache Sources.
 #################################
 
 VERSIONS
+- v0.2: Added functionality to use ConfigMgr for device status instead of ping
+        to speed up the scan time. Thanks to Chad Simmons (@chadstech) for the
+        idea.
+
+        Added functionality to reconsider blacklist devices IF the threshold
+        for Peer Cache Sources is not met. Thanks to Chad Simmons (@chadstech)
+        and Glen McCellan (@Glenn_McClellan) for the idea.
+
 - v0.1: Initial version. It doesn't look that pretty. I apologize. Next version
         I will do some more refactoring to hopefully prettify some of this and
         make it a bit more readable.
@@ -138,12 +146,12 @@ if(Test-Path $OPCSExcludePCSFile)
     $OPCSExcludePCS = Get-Content $OPCSExcludePCSFile
 }
 
-# Load the Blacklist
+# Load the Blacklist Source File
 [array]$OPCSBlacklist = @()
 $OPCSBlacklistFile = "$PSScriptRoot\_BlacklistedDevices.txt"
 if(Test-Path $OPCSBlacklistFile)
 {
-    $OPCSBlacklist = Get-Content $OPCSBlacklistFile
+    $OPCSExcludePCS = Get-Content $OPCSBlacklistFile
 }
 #endregion Initialization
 
@@ -241,6 +249,46 @@ function Write-OPCSLogs
     }
 }
 
+##############################
+## VALIDATE DEVICE FUNCTION ##
+##############################
+function Confirm-OPCSDevice($deviceFQDN)
+{
+    <#
+    .SYNOPSIS
+    Returns an integer value based on the scan that is run.
+
+    0 - Successful
+    1 - Not Pingable / Not Active in ConfigMgr
+    2 - Cannot resolve in DNS
+    #>
+    # PING TEST #
+    if($OPCSScanType -eq "ping")
+    {
+        $scanResult = Test-NetConnection -ComputerName $deviceFQDN
+
+        # Return Codes
+        if($scanResult.NameResolutionSucceeded -eq $false){ return 2 }
+        elseif($scanResult.PingSucceeded -eq $false){ return 1 }
+        else{ return 0 }
+    }
+
+    # CONFIGMGR TEST #
+    if($OPCSScanType -eq "configmgr")
+    {
+        
+        $resourceID = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_COMPUTER_SYSTEM" -Filter "Name = '$($devceFQDN.Substring(0,$deviceFQDN.IndexOf('.')))' and Domain = '$($devceFQDN.Substring($deviceFQDN.IndexOf('.') + 1))'").ResourceID
+        $onlineStatus = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_CN_ClientStatus" -Filter "ResourceID = '$($resourceID)'").OnlineStatus
+        $dnsResolution = $true
+        try{ $null = Resolve-DnsName -Name $deviceFQDN -DnsOnly -ErrorAction Stop } catch { $dnsResolution = $false }
+        
+        # Return Codes
+        if($dnsResolution -eq $false){ return 2 }
+        elseif($onlineStatus -eq 0){ return 1 }
+        else{ return 0 }
+    }
+}
+
 #####################################
 ## FIND VALID COLLECTIONS FUNCTION ##
 #####################################
@@ -309,7 +357,7 @@ function Find-CMDeviceByCollection($phase, $Collections, $hColToMachine)
         $cdevs = Get-CMDevice -CollectionId $($c.CollectionID)
         
         $nonExcludedComputers = @() # Array of computers to evaluate
-        $excludedComputers = $OPCSExcludePCS + $OPCSBlacklist # Computers excluded from being Peer Cache Sources (by FQDN)
+        [array]$excludedComputers = $OPCSExcludePCS + $OPCSBlacklist # Computers excluded from being Peer Cache Sources (by FQDN)
 
         # Iterate through CMDevices and only add non-excluded computers
         foreach($cdev in $cdevs)
@@ -367,10 +415,10 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
         $dchassis = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SYSTEM_ENCLOSURE" -Filter "ResourceID = '$($device.ResourceID)'").ChassisTypes
         
         # This is probably the most time consuming part - test the connection to the device to ensure that it is a worthy Peer Cache Source
-        $dping = Test-NetConnection -ComputerName "$($device.Name).$dfulldomain"
+        $dstatus = Confirm-OPCSDevice -deviceFQDN "$($device.Name).$dfulldomain"
 
         # If the network connection succeeds, then we can potentially use this device
-        if($dping.PingSucceeded -eq $true)
+        if($dstatus -eq 0)
         {
             # Here we want to make sure that ConfigMgr knows certain info about the device, and that it meets or exceeds Minimum Memory and Minimum Hard Drive requirements
             if(($dmemory -ne $null -and $dhdspace -ne $null -and $dhdfspace -ne $null) -and $dmemory -ge ([int]$OPCSMinMemory * 1024) -and $dhdspace -ge ([int]$OPCSMinHardDrive * 1024))
@@ -400,7 +448,7 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
                 Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Gathering" -Description "Device $($device.Name) is not eligible" -Level 2
             }
         }
-        elseif($dping.NameResolutionSucceeded -eq $false) # Device was not found in DNS... should be blacklisted
+        elseif($dstatus -eq 2) # Device was not found in DNS... should be blacklisted
         {
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Gathering" -Description "Device $($device.Name) is not in DNS. Blacklisting." -Level 3
             Add-Content $OPCSBlacklistFile "`r$($device.Name).$dfulldomain" -Force -WhatIf:$WhatIf # Add to blacklist
@@ -520,7 +568,7 @@ if($OPCSInitialRun)
         $child.SetAttribute("RI",$d.RI) # Add resource ID attribute (because you can't add to collection by name directly)
         $child.SetAttribute("CN",$d.CN) # Add the collection name for the device
         $child.SetAttribute("NumWarnings",$d.NumWarnings) # Create the number of warnings attribute - used for blacklisting devices that have been offline too many times
-        $void = $OPCSData.DocumentElement.AppendChild($child) # Add the PeerCacheSource to the XML
+        $null = $OPCSData.DocumentElement.AppendChild($child) # Add the PeerCacheSource to the XML
     }
     if($WhatIf){ Write-Host -ForegroundColor Yellow "What If: Saving XML Database to $PSScriptRoot\__OPCSData.xml" }
     else{ $OPCSData.Save("$PSScriptRoot\__OPCSData.xml") } # Save the XML file
@@ -649,9 +697,14 @@ else
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Evaluating Blacklist and User Exclusions" -Level 1
     $devicesRemoved = @()
     $removeFromXML = @()
+    
+    # Exclusions
+    [array]$excludedComputers = $OPCSExcludePCS
+    if($OPCSIgnoreBlacklist -ne $true){$excludedComputers += $OPCSBlacklist}
+
     foreach($pcs in $peerCacheSources)
     {
-        if(($pcs.CName -in $OPCSExcludePCS) -or ($pcs.CName -in $OPCSBlacklist))
+        if($pcs.CName -in $excludedComputers)
         {
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Removed `"$($pcs.CName)`" from Peer Cache Source List" -Level 2
             $devicesRemoved += $pcs.CName
@@ -685,8 +738,8 @@ else
     foreach($pcs in $peerCacheSources)
     {
         $pb++
-        $conTest = Test-NetConnection $pcs.CName
-        if($conTest.NameResolutionSucceeded -eq $false)
+        $conTest = Confirm-OPCSDevice -deviceFQDN $pcs.CName
+        if($conTest -eq 2)
         {
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Device `"$($pcs.CName)`" not resolvable. Adding to blacklist and removing from Peer Cache Sources." -Level 3
             $removeFromXML += $pcs
@@ -694,7 +747,7 @@ else
             $BlacklistedComputers += "$($pcs.CName)" # Add to list of blacklisted devices for report
             Remove-CMDeviceCollectionDirectMembershipRule -CollectionName "$OPCSPCCLimitingCollectionName" -ResourceId $pcs.RI -WhatIf:$WhatIf -ErrorAction SilentlyContinue
         }
-        elseif($conTest.PingSucceeded -eq $false)
+        elseif($conTest -eq 1)
         {
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Device `"$($pcs.Name)`" unreachable. Incrementing counter." -Level 2
             [int]$numWarnings = $pcs.NumWarnings
@@ -760,7 +813,8 @@ else
             $cdevs = Get-CMDevice -CollectionId $($c.CollectionID)
             
             $nonExcludedComputers = @() # Array of computers to evaluate
-            $excludedComputers = $OPCSExcludePCS + $OPCSBlacklist + $colDev.CName # Computers excluded from being Peer Cache Sources (by FQDN) - also the devices already in the collection
+            [array]$excludedComputers = $OPCSExcludePCS + $colDev.CName # Computers excluded from being Peer Cache Sources (by FQDN) - also the devices already in the collection
+            if($OPCSIgnoreBlacklist -ne $true){$excludedComputers += $OPCSBlacklist}
 
             # Iterate through CMDevices and only add non-excluded computers
             foreach($cdev in $cdevs)
