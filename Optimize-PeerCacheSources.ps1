@@ -57,6 +57,9 @@ VERSIONS
 - v0.1: Initial version. It doesn't look that pretty. I apologize. Next version
         I will do some more refactoring to hopefully prettify some of this and
         make it a bit more readable.
+
+- v0.0: Does anyone actually read this? Probably yes now that it's been added to
+        the Git commit log.
 #>
 
 param(
