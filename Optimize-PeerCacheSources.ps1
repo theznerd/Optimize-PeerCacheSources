@@ -38,6 +38,14 @@ that you want to ensure a minimum number of Peer Cache Sources.
 #################################
 
 VERSIONS
+- v0.3: Added criteria to better evaluate clients (Wireless vs Wired, SSD /
+        NVME, Exclude VMs).
+
+        SSD/NVME search requires Win32_DiskDriveToDiskPartition and
+        Win32_LogicalDiskToPartition be enabledin the hardware inventory.
+        These are not default classes and need to be imported. Details in
+        the blog post.
+
 - v0.2: Added functionality to use ConfigMgr for device status instead of ping
         to speed up the scan time. Thanks to Chad Simmons (@chadstech) for the
         idea.
@@ -414,17 +422,53 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
         # Gather the chassis type to determine if it is a laptop or not
         $dchassis = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SYSTEM_ENCLOSURE" -Filter "ResourceID = '$($device.ResourceID)'").ChassisTypes
         
+        # Gather the drive captions to search for NVME/SSD
+        $dLDTPA = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_LOGICAL_DISK_TO_PARTITION" -Filter "ResourceID = '$($device.ResourceID)' and Dependent like '%C:%'").Antecedent
+        $dDDTDP = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_DISK_DRIVE_TO_DISK_PARTITION" -Filter "ResourceID = '$($device.ResourceID)'" | Where-Object {$_.Dependent -eq $dLDTPA}).Antecedent
+        if($null -ne $dDDTDP)
+        {
+            $dPDID = $dDDTDP.Substring($dDDTDP.IndexOf("`"")).Replace("\\","\").Replace("`"","")
+            $dPDName = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_DISK" -Filter "ResourceID = '$($device.ResourceID)'" | Where-Object {$_.DeviceID -eq $dPDID}).Caption
+            if($dPDName -like "%NVME%" -or $dPDName -like "%SSD%")
+            {
+                $dSSD = $true
+            }
+            else
+            {
+                $dSSD = $false
+            }
+        }
+        else
+        {
+            $dSSD = $false
+        }
+
+        # Determine if wireless disabled
+        if((Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SERVICE" -Filter "ResourceID = '$($device.ResourceID)' and Name = 'WlanSvc'").StartMode -eq "Manual" -or (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SERVICE" -Filter "ResourceID = '$($device.ResourceID)' and Name = 'WlanSvc'").StartMode -eq "Disabled")
+        {
+            $dWirelessDisabled = $true
+        }
+        else{ $dWirelessDisabled = $false }
+
+        # Determine if device is a VM
+        if((Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE" -Filter "ResourceID = '$($device.ResourceID)'") -ne $null -or (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE_64" -Filter "ResourceID = '$($device.ResourceID)'") -ne $null)
+        {
+            $dvm = $true
+        }
+        else { $dvm = $false }
+        
         # This is probably the most time consuming part - test the connection to the device to ensure that it is a worthy Peer Cache Source
         $dstatus = Confirm-OPCSDevice -deviceFQDN "$($device.Name).$dfulldomain"
 
         # If the network connection succeeds, then we can potentially use this device
         if($dstatus -eq 0)
         {
-            # Here we want to make sure that ConfigMgr knows certain info about the device, and that it meets or exceeds Minimum Memory and Minimum Hard Drive requirements
-            if(($dmemory -ne $null -and $dhdspace -ne $null -and $dhdfspace -ne $null) -and $dmemory -ge ([int]$OPCSMinMemory * 1024) -and $dhdspace -ge ([int]$OPCSMinHardDrive * 1024))
+            # Here we want to make sure the device meets or exceeds Minimum Memory and Minimum Hard Drive requirements
+            if($dmemory -ge ([int]$OPCSMinMemory * 1024) -and $dhdspace -ge ([int]$OPCSMinHardDrive * 1024))
             {
                 # Finally we might want to exclude laptops... so check that as well
-                if((($dchassis -in $ltChassis) -and $OPCSIncludeLaptops) -or ($dchassis -notin $ltChassis))
+                # Also exclude VMs... because... yuck.
+                if(((($dchassis -in $ltChassis) -and $OPCSIncludeLaptops) -or ($dchassis -notin $ltChassis)) -and (-not $dvm))
                 {
                     # Create a custom PoSH object we'll use to build the evaluate and sort.
                     $do = New-Object -TypeName PSObject
@@ -434,7 +478,9 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
                     $do | Add-Member -MemberType NoteProperty -Name 'Memory' -Value $dmemory
                     $do | Add-Member -MemberType NoteProperty -Name 'HDSpace' -Value $dhdspace
                     $do | Add-Member -MemberType NoteProperty -Name 'HDFreeSpace' -Value $dhdfspace
-                    
+                    $do | Add-Member -MemberType NoteProperty -Name 'WirelessDisabled' -Value $dWirelessDisabled
+                    $do | Add-Member -MemberType NoteProperty -Name 'SSD' -Value $dSSD
+
                     # Add the device to eligible devices
                     $eligibleDevices.Value += $do
                 }
@@ -531,7 +577,7 @@ if($OPCSInitialRun)
         
         # Take the eligible devices, filter by collection, sort by free hard drive space and then memory
         # then select only the number of devices that we have configured in PeerCacheSourcesPerCollection
-        [array]$devicesForCollection = $eligibleDevices | Where-Object {$_.CollectionID -eq $c.CollectionID} | Sort-Object -Property HDFreeSpace,Memory -Descending | Select-Object -First $OPCSPeerCacheSourcesPerCollection
+        [array]$devicesForCollection = $eligibleDevices | Where-Object {$_.CollectionID -eq $c.CollectionID} | Sort-Object -Property WirelessDisabled,SSD,HDFreeSpace,Memory -Descending | Select-Object -First $OPCSPeerCacheSourcesPerCollection
         
         if($devicesForCollection.Count -eq 0) # Collection has no eligible devices
         {
@@ -832,7 +878,7 @@ else
 
             # Take the eligible devices, filter by collection, sort by free hard drive space and then memory
             # then select only the number of devices that we have configured in PeerCacheSourcesPerCollection
-            $devicesForCollection = $eligibleDevices | Sort-Object -Property HDFreeSpace,Memory -Descending | Select-Object -First $n
+            $devicesForCollection = $eligibleDevices | Sort-Object -Property WirelessDisabled,SSD,HDFreeSpace,Memory -Descending | Select-Object -First $n
 
             if($devicesForCollection.Count + $colDev.Count -eq 0) # Collection has no eligible devices
             {
