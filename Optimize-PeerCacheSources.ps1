@@ -125,7 +125,7 @@ else
 }
 
 # Create Site Drive
-if((Get-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -ErrorAction SilentlyContinue) -eq $null) {
+if($null -eq (Get-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
     New-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -Root $OPCSSiteServer
 }
 
@@ -321,7 +321,7 @@ function Find-ValidCMCollections($phase, $collectionArray, [ref]$validCollection
         # Find Collection By Name
         $c = Get-CMDeviceCollection -Name $collection
         
-        if($c -eq $null) #If null, warn in log and add to collections not found list
+        if($null -eq $c) #If null, warn in log and add to collections not found list
         {
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Collection: $collection Not Found..." -Level 2
             $collectionsNotFound.Value += $collection
@@ -454,7 +454,7 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
         else{ $dWirelessDisabled = $false }
 
         # Determine if device is a VM
-        if((Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE" -Filter "ResourceID = '$($device.ResourceID)'") -ne $null -or (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE_64" -Filter "ResourceID = '$($device.ResourceID)'") -ne $null)
+        if($null -ne (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE" -Filter "ResourceID = '$($device.ResourceID)'") -or $null -ne (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE_64" -Filter "ResourceID = '$($device.ResourceID)'"))
         {
             $dvm = $true
         }
@@ -632,7 +632,7 @@ if($OPCSInitialRun)
     if(-not $dcol) # Collection doesn't exist - create it
     {
         # The collection specifically has no refresh because we'll expect the script to be run regularly and refresh when needed
-        $void = New-CMDeviceCollection -Name $OPCSPCCName -RefreshType None -RefreshSchedule (New-CMSchedule -Start "1/1/1970 12:00:00 AM" -Nonrecurring) -LimitingCollectionName $OPCSPCCLimitingCollectionName -WhatIf:$WhatIf
+        $null = New-CMDeviceCollection -Name $OPCSPCCName -RefreshType None -RefreshSchedule (New-CMSchedule -Start "1/1/1970 12:00:00 AM" -Nonrecurring) -LimitingCollectionName $OPCSPCCLimitingCollectionName -WhatIf:$WhatIf
     }
 
     # Add Devices To Collection
@@ -762,7 +762,7 @@ else
         }
         else
         {
-            if((Get-CMDeviceCollectionDirectMembershipRule -CollectionName "$OPCSPCCName" -ResourceId $pcs.RI) -eq $null)
+            if($null -eq (Get-CMDeviceCollectionDirectMembershipRule -CollectionName "$OPCSPCCName" -ResourceId $pcs.RI))
             {
                 Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Device `"$($pcs.CName)`" missing from Peer Cache collection. Readding." -Level 2
                 # Didn't see a direct relationship for this collection, re-adding device to collection. Maybe it was manually removed?
