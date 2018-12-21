@@ -775,7 +775,7 @@ else
     ##### Cleanup XML File #####
     foreach($item in $removeFromXML)
     {
-        $void = $OPCSData.PeerCacheSources.RemoveChild($item)
+        $null = $OPCSData.PeerCacheSources.RemoveChild($item)
     }
     $removeFromXML = @()
 
