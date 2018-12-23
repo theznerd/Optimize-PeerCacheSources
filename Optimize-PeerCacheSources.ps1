@@ -38,6 +38,14 @@ that you want to ensure a minimum number of Peer Cache Sources.
 #################################
 
 VERSIONS
+- v1.0: Well... it's been tested. So I guess it's v1.0 now?
+
+- v0.4: Some cleanup and bad gramer (yes, that was intentional). Also fixed
+        a couple of the queries that weren't working as planned. Added more
+        parameters to support multiple "databases" and blacklists for the
+        script, because I'm testing this in an environment with five distinct
+        markets, so yeah... probably a good idea.
+
 - v0.3: Added criteria to better evaluate clients (Wireless vs Wired, SSD /
         NVME, Exclude VMs).
 
@@ -61,7 +69,6 @@ VERSIONS
 - v0.0: Does anyone actually read this? Probably yes now that it's been added to
         the Git commit log.
 #>
-
 param(
     # Whatif Switch
     [Parameter()]
@@ -71,12 +78,28 @@ param(
     # Path to the Settings.ini file - defaults to $PSScriptRoot\__OPCSSettings.ini
     [Parameter()]
     [string]
-    $SettingsPath="$PSScriptRoot\__OPCSSettings.ini",
+    $SettingsPath="$PSScriptRoot\__OPCSSettings-CO.ini",
 
     # Path to the xml "Database" file - defaults to $PSScriptRoot\__OPCSData.xml
     [Parameter()]
     [string]
-    $DataPath="$PSScriptRoot\__OPCSData.xml"
+    $DataPath="$PSScriptRoot\__OPCSData-CO.xml",
+
+    # Path to the Boundary Collection file - defaults to $PSScriptRoot\_BoundaryCollectionNames.txt
+    [Parameter()]
+    [string]
+    $CollectionFile="$PSScriptRoot\_BoundaryCollectionNames-CO.txt",
+
+    # Path to the Blacklisted Devices file - defaults to $PSScriptRoot\_BlacklistedDevices.txt
+    [Parameter()]
+    [string]
+    $BlacklistFile="$PSScriptRoot\_BlacklistedDevices.txt",
+
+    # Path to the Excluded Devices file - defaults to $PSScriptRoot\_ExcludePeerCacheSource.txt
+    [Parameter()]
+    [string]
+    $ExcludeFile="$PSScriptRoot\_ExcludePeerCacheSource.txt"
+    
 )
 
 ####################
@@ -93,6 +116,7 @@ $ltChassis = @("8", "9", "10", "11", "12", "14", "18", "21")
 # Load Settings
 if(Test-Path "$SettingsPath")
 {
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading Settings." -Level 4
     [array]$settingsArray = Get-Content "$SettingsPath" | Where-Object {($_ -ne "") -and (-not $_.StartsWith(';'))}
     foreach($s in $settingsArray)
     {
@@ -112,6 +136,17 @@ if(Test-Path "$SettingsPath")
         }
     }
 }
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Settings ini not found at $SettingsPath" -Level 3
+    Throw "Settings ini file not found. Please check your parameters."
+}
+
+if($OPCSLogFileAppendDate)
+{
+    $date = Get-Date -Format "-yyyy-MM-dd"
+    $OPCSLogFilePath = "$($OPCSLogFilePath.Substring(0,$OPCSLogFilePath.LastIndexOf(".")))$date$($OPCSLogFilePath.Substring($OPCSLogFilePath.LastIndexOf(".")))"
+}
 
 # Dependency Check
 if(-not (Test-Path "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"))
@@ -121,11 +156,13 @@ if(-not (Test-Path "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"))
 }
 else
 {
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Importing ConfigMgr module." -Level 4
     Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"
 }
 
 # Create Site Drive
 if($null -eq (Get-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Connecting to ConfigMgr site: $OPCSSiteServer - $OPCSSiteCode" -Level 4
     New-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -Root $OPCSSiteServer
 }
 
@@ -133,36 +170,52 @@ if($null -eq (Get-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -ErrorAction Si
 if((Test-Path "$DataPath") -and (-not $OPCSInitialRun))
 {
     # Load the Database
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading the database at $DataPath" -Level 4
     [xml]$OPCSData = Get-Content "$DataPath"
 }
 else
 {
     # Create and then load the database
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Database file not found - creating new one at: $DataPath" -Level 2
     [xml]$OPCSData = Get-Content (New-Item -Path "$DataPath" -ItemType "File" -Value "<?xml version=`"1.0`" ?>`r`n<PeerCacheSources>`r`n</PeerCacheSources>" -Force)
 }
 
 # Load the Boundary Collections Name File
 [array]$OPCSCollections = @()
-$OPCSCollectionsFile = "$PSScriptRoot\_BoundaryCollectionNames.txt"
+$OPCSCollectionsFile = $CollectionFile
 if(Test-Path $OPCSCollectionsFile)
 {
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading collections list from $OPCSCollectionsFile" -Level 4
     $OPCSCollections = Get-Content $OPCSCollectionsFile
+}
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Collection list file not found." -Level 3
+    Throw "Collection list file not found."
 }
 
 # Load the Exclude Peer Cache Source File
 [array]$OPCSExcludePCS = @()
-$OPCSExcludePCSFile = "$PSScriptRoot\_ExcludePeerCacheSource.txt"
+$OPCSExcludePCSFile = $ExcludeFile
 if(Test-Path $OPCSExcludePCSFile)
 {
     $OPCSExcludePCS = Get-Content $OPCSExcludePCSFile
 }
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Exclusion file not found." -Level 2
+}
 
 # Load the Blacklist Source File
 [array]$OPCSBlacklist = @()
-$OPCSBlacklistFile = "$PSScriptRoot\_BlacklistedDevices.txt"
+$OPCSBlacklistFile = $BlacklistFile
 if(Test-Path $OPCSBlacklistFile)
 {
     $OPCSExcludePCS = Get-Content $OPCSBlacklistFile
+}
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Blacklist file not found." -Level 2
 }
 #endregion Initialization
 
@@ -274,7 +327,7 @@ function Confirm-OPCSDevice($deviceFQDN)
     2 - Cannot resolve in DNS
     #>
     # PING TEST #
-    if($OPCSScanType -eq "ping")
+    if($OPCSDeviceScanType -eq "ping")
     {
         $scanResult = Test-NetConnection -ComputerName $deviceFQDN
 
@@ -285,11 +338,11 @@ function Confirm-OPCSDevice($deviceFQDN)
     }
 
     # CONFIGMGR TEST #
-    if($OPCSScanType -eq "configmgr")
+    if($OPCSDeviceScanType -eq "configmgr")
     {
         
-        $resourceID = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_COMPUTER_SYSTEM" -Filter "Name = '$($devceFQDN.Substring(0,$deviceFQDN.IndexOf('.')))' and Domain = '$($devceFQDN.Substring($deviceFQDN.IndexOf('.') + 1))'").ResourceID
-        $onlineStatus = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_CN_ClientStatus" -Filter "ResourceID = '$($resourceID)'").OnlineStatus
+        $resourceID = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_COMPUTER_SYSTEM" -Filter "Name = '$($deviceFQDN.Substring(0,$deviceFQDN.IndexOf('.')))' and Domain = '$($deviceFQDN.Substring($deviceFQDN.IndexOf('.') + 1))'").ResourceID
+        $onlineStatus = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_CN_ClientStatus" -Filter "ResourceID = '$($resourceID)'").OnlineStatus
         $dnsResolution = $true
         try{ $null = Resolve-DnsName -Name $deviceFQDN -DnsOnly -ErrorAction Stop } catch { $dnsResolution = $false }
         
@@ -310,7 +363,7 @@ function Find-ValidCMCollections($phase, $collectionArray, [ref]$validCollection
     Set-Location "$($OPCSSiteCode):\"
 
     ##### Gather Collections List #####
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Gathering" -Description "Gathering collections from provided list." -Level 1
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Gathering collections from provided list." -Level 1
 
     $pb = 0 # Progress Bar Counter
     foreach($collection in $OPCSCollections)
@@ -362,7 +415,7 @@ function Find-CMDeviceByCollection($phase, $Collections, $hColToMachine)
     foreach($c in $aCollections)
     {
         $pb++ # Increase progress bar counter
-        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Gathering devices from: $collection" -Level 4
+        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Gathering devices from: $($c.Name)" -Level 4
         
         # Get devices belonging to the collection
         $cdevs = Get-CMDevice -CollectionId $($c.CollectionID)
@@ -401,37 +454,37 @@ function Find-CMDeviceByCollection($phase, $Collections, $hColToMachine)
 ###############################
 ## EVALUATE DEVICES FUNCTION ##
 ###############################
-function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$EligibleDevices, [ref]$BlacklistedComputers)
+function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, $cid, [ref]$EligibleDevices, [ref]$BlacklistedComputers)
 {
     $pb = 0
 
     foreach($device in $DevicesForScanning)
     {
         $pb++ # increment progress bar
-        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "Evaluating: $($device.Name)" -Level 4
+        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Evaluating" -Description "Evaluating: $($device.Name)" -Level 4
         
         # Get the full domain (e.g. contoso.com) of the device for multi-domain support
-        $dfulldomain = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_COMPUTER_SYSTEM" -Filter "ResourceID = '$($device.ResourceID)'").Domain
+        $dfulldomain = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_COMPUTER_SYSTEM" -Filter "ResourceID = '$($device.ResourceID)'").Domain
         
         # Gather the total physical memory
-        $dmemory = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_X86_PC_MEMORY" -Filter "ResourceID = '$($device.ResourceID)'").TotalPhysicalMemory
+        $dmemory = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_X86_PC_MEMORY" -Filter "ResourceID = '$($device.ResourceID)'").TotalPhysicalMemory
         
         # Gather the space of the C drive.
-        $dhdspace = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_LOGICAL_DISK" -Filter "ResourceID = '$($device.ResourceID)' and DeviceID = 'C:'").Size
+        $dhdspace = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_LOGICAL_DISK" -Filter "ResourceID = '$($device.ResourceID)' and DeviceID = 'C:'").Size
         
         # Gather the free space of the C drive (logic will lean towards using the computer(s) with the most free space)
-        $dhdfspace = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_LOGICAL_DISK" -Filter "ResourceID = '$($device.ResourceID)' and DeviceID = 'C:'").FreeSpace
+        $dhdfspace = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_LOGICAL_DISK" -Filter "ResourceID = '$($device.ResourceID)' and DeviceID = 'C:'").FreeSpace
 
         # Gather the chassis type to determine if it is a laptop or not
-        $dchassis = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SYSTEM_ENCLOSURE" -Filter "ResourceID = '$($device.ResourceID)'").ChassisTypes
+        $dchassis = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SYSTEM_ENCLOSURE" -Filter "ResourceID = '$($device.ResourceID)'").ChassisTypes
         
         # Gather the drive captions to search for NVME/SSD
-        $dLDTPA = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_LOGICAL_DISK_TO_PARTITION" -Filter "ResourceID = '$($device.ResourceID)' and Dependent like '%C:%'").Antecedent
-        $dDDTDP = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_DISK_DRIVE_TO_DISK_PARTITION" -Filter "ResourceID = '$($device.ResourceID)'" | Where-Object {$_.Dependent -eq $dLDTPA}).Antecedent
+        $dLDTPA = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_LOGICAL_DISK_TO_PARTITION" -Filter "ResourceID = '$($device.ResourceID)' and Dependent like '%C:%'").Antecedent
+        $dDDTDP = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_DISK_DRIVE_TO_DISK_PARTITION" -Filter "ResourceID = '$($device.ResourceID)'" | Where-Object {$_.Dependent -eq $dLDTPA}).Antecedent
         if($null -ne $dDDTDP)
         {
             $dPDID = $dDDTDP.Substring($dDDTDP.IndexOf("`"")).Replace("\\","\").Replace("`"","")
-            $dPDName = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_DISK" -Filter "ResourceID = '$($device.ResourceID)'" | Where-Object {$_.DeviceID -eq $dPDID}).Caption
+            $dPDName = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_DISK" -Filter "ResourceID = '$($device.ResourceID)'" | Where-Object {$_.DeviceID -eq $dPDID}).Caption
             if($dPDName -like "%NVME%" -or $dPDName -like "%SSD%")
             {
                 $dSSD = $true
@@ -447,18 +500,14 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
         }
 
         # Determine if wireless disabled
-        if((Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SERVICE" -Filter "ResourceID = '$($device.ResourceID)' and Name = 'WlanSvc'").StartMode -eq "Manual" -or (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SERVICE" -Filter "ResourceID = '$($device.ResourceID)' and Name = 'WlanSvc'").StartMode -eq "Disabled")
+        if((Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SERVICE" -Filter "ResourceID = '$($device.ResourceID)' and Name = 'WlanSvc'").StartMode -eq "Manual" -or (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_SERVICE" -Filter "ResourceID = '$($device.ResourceID)' and Name = 'WlanSvc'").StartMode -eq "Disabled")
         {
             $dWirelessDisabled = $true
         }
         else{ $dWirelessDisabled = $false }
 
         # Determine if device is a VM
-        if($null -ne (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE" -Filter "ResourceID = '$($device.ResourceID)'") -or $null -ne (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_VIRTUAL_MACHINE_64" -Filter "ResourceID = '$($device.ResourceID)'"))
-        {
-            $dvm = $true
-        }
-        else { $dvm = $false }
+        $dvm = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_R_System" -Filter "ResourceID = '$($device.ResourceID)'").IsVirtualMachine
         
         # This is probably the most time consuming part - test the connection to the device to ensure that it is a worthy Peer Cache Source
         $dstatus = Confirm-OPCSDevice -deviceFQDN "$($device.Name).$dfulldomain"
@@ -471,7 +520,7 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
             {
                 # Finally we might want to exclude laptops... so check that as well
                 # Also exclude VMs... because... yuck.
-                if(((($dchassis -in $ltChassis) -and $OPCSIncludeLaptops) -or ($dchassis -notin $ltChassis)) -and (-not $dvm))
+                if(((($dchassis -in $ltChassis) -and $OPCSIncludeLaptops) -or ($dchassis -notin $ltChassis)) -and ((-not $dvm) -or ($dvm -and $OPCSIncludeVMs)))
                 {
                     # Create a custom PoSH object we'll use to build the evaluate and sort.
                     $do = New-Object -TypeName PSObject
@@ -487,37 +536,45 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, [ref]$Elig
                     # Add the device to eligible devices
                     $eligibleDevices.Value += $do
                 }
-                else # Device was excluded because it's a laptop
+                else # Device was excluded because it's a laptop or vm
                 {
-                    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Gathering" -Description "Device $($device.Name) is not eligible. Laptops are excluded via `"IncludeLaptops`" setting in __OPCSSettings.ini" -Level 2
+                    if($dvm)
+                    {
+                        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Device $($device.Name) is not eligible. VMs are excluded via `"IncludeVMs`" setting in $SettingsPath" -Level 2
+                    }
+                    else
+                    {
+                        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Device $($device.Name) is not eligible. Laptops are excluded via `"IncludeLaptops`" setting in $SettingsPath" -Level 2
+                    }
                 }
             }
             else # Device didn't meet requirements
             {
-                Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Gathering" -Description "Device $($device.Name) is not eligible" -Level 2
+                Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Device $($device.Name) is not eligible due to hard drive or memory." -Level 2
             }
         }
         elseif($dstatus -eq 2) # Device was not found in DNS... should be blacklisted
         {
-            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Gathering" -Description "Device $($device.Name) is not in DNS. Blacklisting." -Level 3
+            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Device $($device.Name) is not in DNS. Blacklisting." -Level 3
             Add-Content $OPCSBlacklistFile "`r$($device.Name).$dfulldomain" -Force -WhatIf:$WhatIf # Add to blacklist
             $BlacklistedComputers.Value += "$($device.Name).$dfulldomain" # Add to list of blacklisted devices for report
         }
         else # Device was unreachable... don't blacklist, but also let's not include it.
         {
-            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Gathering" -Description "Device $($device.Name) is not reachable. Not including as eligible." -Level 2
+            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Gathering" -Description "Device $($device.Name) is not reachable/online. Not including as eligible." -Level 2
         }
 
         # Every three devices, write progress bar to the log
         if($pb % 3 -eq 0)
         {
-            $percentage = [math]::Round(($pb / $hColToMachine[$cid].Count) * 100)
-            $blocks = [math]::Round(($pb /$hColToMachine[$cid].Count) * 25)
+            $percentage = [math]::Round(($pb / $DevicesForScanning.Count) * 100)
+            $blocks = [math]::Round(($pb /$DevicesForScanning.Count) * 25)
             $lines = 25 - $blocks
             $progbar = "|" + "#"*$blocks + "-"*$lines + "|"
-            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "$progbar Collection: $cid - $percentage% complete evaluating devices." -Level 1
+            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Evaluating" -Description "$progbar Collection: $cid - $percentage% complete evaluating devices." -Level 1
         }
     }
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description ("|" + "#"*25 + "| Device evaluation for $cid 100% complete.") -Level 1
 }
 
 #endregion Functions
@@ -548,7 +605,7 @@ if($OPCSInitialRun)
     ## WARNING THIS PROCESS WILL TAKE SOME TIME TO COMPLETE ##
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "Evaluating eligible devices from found collections." -Level 1
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "++++++++++++++++++++++++++++++++++++" -Level 2
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "THIS WILL TAKE SOME TIME TO COMPLETE - PATIENCE IS A VIRTUE" -Level 2
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "THIS MAY TAKE SOME TIME TO COMPLETE - PATIENCE IS A VIRTUE" -Level 2
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "++++++++++++++++++++++++++++++++++++" -Level 2
     
     $eligibleDevices = @() # Array of eligible devices
@@ -560,9 +617,7 @@ if($OPCSInitialRun)
         Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "Evaluating devices from: $cid ($i of $($hColToMachine.Count))" -Level 1
         
         # Iterate devices in collection
-        Find-ValidCMDevicesByCollection -phase "Initial" -DevicesForScanning $hColToMachine[$cid] -EligibleDevices ([ref]$eligibleDevices) -BlacklistedComputers ([ref]$BlacklistedComputers)
-
-        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description ("|" + "#"*25 + "| Device evaluation for $cid 100% complete.") -Level 1
+        Find-ValidCMDevicesByCollection -phase "Initial" -cid $cid -DevicesForScanning $hColToMachine[$cid] -EligibleDevices ([ref]$eligibleDevices) -BlacklistedComputers ([ref]$BlacklistedComputers)
     }
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "Eligible device evaluation complete." -Level 1
 
@@ -607,7 +662,7 @@ if($OPCSInitialRun)
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Building" -Description "Completed building lists of best devices from found collections." -Level 1
 
     ##### Create "Database" File (XML) #####
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Create" -Description "Creating `"database`" file." -Level 1
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Create" -Description "Building `"database`" file." -Level 1
     
     # Iterate through selected devices
     foreach($d in $PCSDevices)
@@ -619,10 +674,10 @@ if($OPCSInitialRun)
         $child.SetAttribute("NumWarnings",$d.NumWarnings) # Create the number of warnings attribute - used for blacklisting devices that have been offline too many times
         $null = $OPCSData.DocumentElement.AppendChild($child) # Add the PeerCacheSource to the XML
     }
-    if($WhatIf){ Write-Host -ForegroundColor Yellow "What If: Saving XML Database to $PSScriptRoot\__OPCSData.xml" }
-    else{ $OPCSData.Save("$PSScriptRoot\__OPCSData.xml") } # Save the XML file
+    if($WhatIf){ Write-Host -ForegroundColor Yellow "What If: Saving XML Database to $DataPath" }
+    else{ $OPCSData.Save($DataPath) } # Save the XML file
     
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Create" -Description "`"Database`" created." -Level 1
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Create" -Description "`"Database`" built." -Level 1
 
     ##### Create Device Collection (if necessary) #####
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Create" -Description "Creating collection: `"$OPCSPCCName`" if necessary." -Level 1
@@ -698,7 +753,7 @@ if($OPCSInitialRun)
     if($LessThanExpectedCollections.Count -gt 0)
     {
         Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run" -Description "Collections with less than $OPCSPeerCacheSourcesPerCollection Peer Cache Sources: $($LessThanExpectedCollections.Count)" -Level 2
-        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run" -Description "The following collections have fewer than configured Peer Cache Sources: " -Level 1
+
         foreach($c in $LessThanExpectedCollections)
         {
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run" -Description "     $c" -Level 1
@@ -709,7 +764,7 @@ if($OPCSInitialRun)
     # Empty collections
     if($EmptyCollections.Count -gt 0)
     {
-        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run" -Description "Collections with NO Peer Cache Sources: $($EmptyCollections)" -Level 3
+        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run" -Description "Collections with NO Peer Cache Sources: $($EmptyCollections.Count)" -Level 3
         Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run" -Description "The following collections have NO Peer Cache Sources: " -Level 1
         foreach($c in $EmptyCollections)
         {
@@ -739,7 +794,6 @@ else
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" -Level 1
     
     ##### Load "Database" File (XML) #####
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Loading `"Database`"" -Level 1
     $peerCacheSources = $OPCSData.PeerCacheSources.ChildNodes
 
     ##### Evaluate User Exclusions and double check blacklist | Validate existing collection #####
@@ -827,7 +881,7 @@ else
     ##### Cleanup XML File #####
     foreach($item in $removeFromXML)
     {
-        $void = $OPCSData.PeerCacheSources.RemoveChild($item)
+        $null = $OPCSData.PeerCacheSources.RemoveChild($item)
     }
     $removeFromXML = @()
 
@@ -853,6 +907,7 @@ else
         $pb = 0
         if($colDev.Count -lt $OPCSPeerCacheSourcesPerCollection)
         {
+            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run - Evaluating" -Description "Collection: $($c.Name) below expected Peer Cache Source count. Reevaluating." -Level 2
             $CollectionsBelowStandard += $c.Name
             # Number of devices needed to reach optimal
             $n = $OPCSPeerCacheSourcesPerCollection - $colDev.Count
@@ -868,24 +923,24 @@ else
             # Iterate through CMDevices and only add non-excluded computers
             foreach($cdev in $cdevs)
             {
-                $dfulldomain = (Get-WmiObject -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_COMPUTER_SYSTEM" -Filter "ResourceID = '$($cdev.ResourceID)'").domain
+                $dfulldomain = (Get-WmiObject -ComputerName $OPCSSiteServer -Namespace "root\sms\site_$OPCSSiteCode" -Class "SMS_G_System_COMPUTER_SYSTEM" -Filter "ResourceID = '$($cdev.ResourceID)'").domain
                 $fqdn = "$($cdev.Name).$dfulldomain"
                 if($fqdn -notin $excludedComputers)
                 {
                     $nonExcludedComputers += $cdev
                 }
             }    
-            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description "Evaluating eligible devices from $($c.Name)." -Level 1
-            Find-ValidCMDevicesByCollection -phase "Delta" -DevicesForScanning $nonExcludedComputers -EligibleDevices ([ref]$eligibleDevices) -BlacklistedComputers ([ref]$BlacklistedComputers)
+            Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run - Evaluating" -Description "Evaluating eligible devices from $($c.Name)." -Level 1
+            Find-ValidCMDevicesByCollection -phase "Delta" -cid $c.CollectionId -DevicesForScanning $nonExcludedComputers -EligibleDevices ([ref]$eligibleDevices) -BlacklistedComputers ([ref]$BlacklistedComputers)
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run - Evaluating" -Description ("|" + "#"*25 + "| Device evaluation for $($c.Name) 100% complete.") -Level 1
 
-            # Take the eligible devices, filter by collection, sort by free hard drive space and then memory
+            # Take the eligible devices, filter by collection, sort by wireless, ssd, free hard drive space, and then memory
             # then select only the number of devices that we have configured in PeerCacheSourcesPerCollection
             $devicesForCollection = $eligibleDevices | Sort-Object -Property WirelessDisabled,SSD,HDFreeSpace,Memory -Descending | Select-Object -First $n
 
             if($devicesForCollection.Count + $colDev.Count -eq 0) # Collection has no eligible devices
             {
-                Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run - Building" -Description "Collection $($c.Name) contains no eligible devices." -Level 3
+                Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run - Building" -Description "Collection $($c.Name) contains NO eligible devices." -Level 3
                 $EmptyCollections += $c.Name
             }
             elseif($devicesForCollection.Count + $colDev.Count -lt $OPCSPeerCacheSourcesPerCollection) # Collection has less than desired amount of eligible devices
@@ -926,7 +981,7 @@ else
         $child.SetAttribute("RI",$d.RI) # Add resource ID attribute (because you can't add to collection by name directly)
         $child.SetAttribute("CN",$d.CN) # Add the collection name for the device
         $child.SetAttribute("NumWarnings",$d.NumWarnings) # Create the number of warnings attribute - used for blacklisting devices that have been offline too many times
-        $void = $OPCSData.DocumentElement.AppendChild($child) # Add the PeerCacheSource to the XML
+        $null = $OPCSData.DocumentElement.AppendChild($child) # Add the PeerCacheSource to the XML
         
         # Write progress bar to log every 3rd computer
         if($pb % 3 -eq 0)
@@ -941,8 +996,8 @@ else
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run - Create" -Description "Done adding devices to collection." -Level 1
 
     ##### Save the Database #####
-    if($WhatIf){ Write-Host -ForegroundColor Yellow "What If: Saving XML Database to $PSScriptRoot\__OPCSData.xml" }
-    else{ $OPCSData.Save("$PSScriptRoot\__OPCSData.xml") } # Save the XML file
+    if($WhatIf){ Write-Host -ForegroundColor Yellow "What If: Saving XML Database to $DataPath" }
+    else{ $OPCSData.Save($DataPath) } # Save the XML file
 
     ##### Force Collection Refresh #####
     Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run - Create" -Description "Refreshing collection: `"$OPCSPCCName`"" -Level 1
@@ -990,7 +1045,7 @@ else
     # Empty collections
     if($EmptyCollections.Count -gt 0)
     {
-        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Collections with NO Peer Cache Sources: $($EmptyCollections)" -Level 3
+        Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "Collections with NO Peer Cache Sources: $($EmptyCollections.Count)" -Level 3
         Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Delta Run" -Description "The following collections have NO Peer Cache Sources: " -Level 1
         foreach($c in $EmptyCollections)
         {
