@@ -78,17 +78,17 @@ param(
     # Path to the Settings.ini file - defaults to $PSScriptRoot\__OPCSSettings.ini
     [Parameter()]
     [string]
-    $SettingsPath="$PSScriptRoot\__OPCSSettings.ini",
+    $SettingsPath="$PSScriptRoot\__OPCSSettings-CO.ini",
 
     # Path to the xml "Database" file - defaults to $PSScriptRoot\__OPCSData.xml
     [Parameter()]
     [string]
-    $DataPath="$PSScriptRoot\__OPCSData.xml",
+    $DataPath="$PSScriptRoot\__OPCSData-CO.xml",
 
     # Path to the Boundary Collection file - defaults to $PSScriptRoot\_BoundaryCollectionNames.txt
     [Parameter()]
     [string]
-    $CollectionFile="$PSScriptRoot\_BoundaryCollectionNames.txt",
+    $CollectionFile="$PSScriptRoot\_BoundaryCollectionNames-CO.txt",
 
     # Path to the Blacklisted Devices file - defaults to $PSScriptRoot\_BlacklistedDevices.txt
     [Parameter()]
@@ -101,123 +101,6 @@ param(
     $ExcludeFile="$PSScriptRoot\_ExcludePeerCacheSource.txt"
     
 )
-
-####################
-## INITIALIZAITON ##
-####################
-#region Initialization
-# Configure Defaults
-$OPCSLogFilePath = "$ENV:TEMP\Optimize-PeerCacheSources.log"
-$OPCSPCCLimitingCollectionName = "All Systems"
-
-# Chassis Types for Laptops
-$ltChassis = @("8", "9", "10", "11", "12", "14", "18", "21")
-
-# Load Settings
-if(Test-Path "$SettingsPath")
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading Settings." -Level 4
-    [array]$settingsArray = Get-Content "$SettingsPath" | Where-Object {($_ -ne "") -and (-not $_.StartsWith(';'))}
-    foreach($s in $settingsArray)
-    {
-        $removeComments = $s.Split(';')
-        $set = $removeComments[0].Split("=")
-        if($set[1] -eq "true")
-        {
-            New-Variable -Name "OPCS$($set[0].Replace(' ',''))" -Value $true -Force
-        }
-        elseif($set[1] -eq "false")
-        {
-            New-Variable -Name "OPCS$($set[0].Replace(' ',''))" -Value $false -Force
-        }
-        else
-        {
-            New-Variable -Name "OPCS$($set[0].Replace(' ',''))" -Value $set[1] -Force
-        }
-    }
-}
-else
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Settings ini not found at $SettingsPath" -Level 3
-    Throw "Settings ini file not found. Please check your parameters."
-}
-
-if($OPCSLogFileAppendDate)
-{
-    $date = Get-Date -Format "-yyyy-MM-dd"
-    $OPCSLogFilePath = "$($OPCSLogFilePath.Substring(0,$OPCSLogFilePath.LastIndexOf(".")))$date$($OPCSLogFilePath.Substring($OPCSLogFilePath.LastIndexOf(".")))"
-}
-
-# Dependency Check
-if(-not (Test-Path "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"))
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "The Configuration Manager PowerShell Module is not installed. Please install the ConfigMgr console on this device." -Level 3
-    Throw "The Configuration Manager PowerShell Module must be installed (install the ConfigMgr Console)"
-}
-else
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Importing ConfigMgr module." -Level 4
-    Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"
-}
-
-# Create Site Drive
-if($null -eq (Get-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Connecting to ConfigMgr site: $OPCSSiteServer - $OPCSSiteCode" -Level 4
-    New-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -Root $OPCSSiteServer
-}
-
-# Load or Create the Database
-if((Test-Path "$DataPath") -and (-not $OPCSInitialRun))
-{
-    # Load the Database
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading the database at $DataPath" -Level 4
-    [xml]$OPCSData = Get-Content "$DataPath"
-}
-else
-{
-    # Create and then load the database
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Database file not found - creating new one at: $DataPath" -Level 2
-    [xml]$OPCSData = Get-Content (New-Item -Path "$DataPath" -ItemType "File" -Value "<?xml version=`"1.0`" ?>`r`n<PeerCacheSources>`r`n</PeerCacheSources>" -Force)
-}
-
-# Load the Boundary Collections Name File
-[array]$OPCSCollections = @()
-$OPCSCollectionsFile = $CollectionFile
-if(Test-Path $OPCSCollectionsFile)
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading collections list from $OPCSCollectionsFile" -Level 4
-    $OPCSCollections = Get-Content $OPCSCollectionsFile
-}
-else
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Collection list file not found." -Level 3
-    Throw "Collection list file not found."
-}
-
-# Load the Exclude Peer Cache Source File
-[array]$OPCSExcludePCS = @()
-$OPCSExcludePCSFile = $ExcludeFile
-if(Test-Path $OPCSExcludePCSFile)
-{
-    $OPCSExcludePCS = Get-Content $OPCSExcludePCSFile
-}
-else
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Exclusion file not found." -Level 2
-}
-
-# Load the Blacklist Source File
-[array]$OPCSBlacklist = @()
-$OPCSBlacklistFile = $BlacklistFile
-if(Test-Path $OPCSBlacklistFile)
-{
-    $OPCSExcludePCS = Get-Content $OPCSBlacklistFile
-}
-else
-{
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Blacklist file not found." -Level 2
-}
-#endregion Initialization
 
 ##############################
 ## PUT THE FUN IN FUNCTIONS ##
@@ -574,10 +457,127 @@ function Find-ValidCMDevicesByCollection($phase, $DevicesForScanning, $cid, [ref
             Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Evaluating" -Description "$progbar Collection: $cid - $percentage% complete evaluating devices." -Level 1
         }
     }
-    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initial Run - Evaluating" -Description ("|" + "#"*25 + "| Device evaluation for $cid 100% complete.") -Level 1
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "$phase Run - Evaluating" -Description ("|" + "#"*25 + "| Device evaluation for $cid 100% complete.") -Level 1
 }
 
 #endregion Functions
+
+####################
+## INITIALIZAITON ##
+####################
+#region Initialization
+# Configure Defaults
+$OPCSLogFilePath = "$ENV:TEMP\Optimize-PeerCacheSources.log"
+$OPCSPCCLimitingCollectionName = "All Systems"
+
+# Chassis Types for Laptops
+$ltChassis = @("8", "9", "10", "11", "12", "14", "18", "21")
+
+# Load Settings
+if(Test-Path "$SettingsPath")
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading Settings." -Level 4
+    [array]$settingsArray = Get-Content "$SettingsPath" | Where-Object {($_ -ne "") -and (-not $_.StartsWith(';'))}
+    foreach($s in $settingsArray)
+    {
+        $removeComments = $s.Split(';')
+        $set = $removeComments[0].Split("=")
+        if($set[1] -eq "true")
+        {
+            New-Variable -Name "OPCS$($set[0].Replace(' ',''))" -Value $true -Force
+        }
+        elseif($set[1] -eq "false")
+        {
+            New-Variable -Name "OPCS$($set[0].Replace(' ',''))" -Value $false -Force
+        }
+        else
+        {
+            New-Variable -Name "OPCS$($set[0].Replace(' ',''))" -Value $set[1] -Force
+        }
+    }
+}
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Settings ini not found at $SettingsPath" -Level 3
+    Throw "Settings ini file not found. Please check your parameters."
+}
+
+if($OPCSLogFileAppendDate)
+{
+    $date = Get-Date -Format "-yyyy-MM-dd"
+    $OPCSLogFilePath = "$($OPCSLogFilePath.Substring(0,$OPCSLogFilePath.LastIndexOf(".")))$date$($OPCSLogFilePath.Substring($OPCSLogFilePath.LastIndexOf(".")))"
+}
+
+# Dependency Check
+if(-not (Test-Path "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"))
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "The Configuration Manager PowerShell Module is not installed. Please install the ConfigMgr console on this device." -Level 3
+    Throw "The Configuration Manager PowerShell Module must be installed (install the ConfigMgr Console)"
+}
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Importing ConfigMgr module." -Level 4
+    Import-Module "$($ENV:SMS_ADMIN_UI_PATH)\..\ConfigurationManager.psd1"
+}
+
+# Create Site Drive
+if($null -eq (Get-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -ErrorAction SilentlyContinue)) {
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Connecting to ConfigMgr site: $OPCSSiteServer - $OPCSSiteCode" -Level 4
+    New-PSDrive -Name $OPCSSiteCode -PSProvider CMSite -Root $OPCSSiteServer
+}
+
+# Load or Create the Database
+if((Test-Path "$DataPath") -and (-not $OPCSInitialRun))
+{
+    # Load the Database
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading the database at $DataPath" -Level 4
+    [xml]$OPCSData = Get-Content "$DataPath"
+}
+else
+{
+    # Create and then load the database
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Database file not found - creating new one at: $DataPath" -Level 2
+    [xml]$OPCSData = Get-Content (New-Item -Path "$DataPath" -ItemType "File" -Value "<?xml version=`"1.0`" ?>`r`n<PeerCacheSources>`r`n</PeerCacheSources>" -Force)
+}
+
+# Load the Boundary Collections Name File
+[array]$OPCSCollections = @()
+$OPCSCollectionsFile = $CollectionFile
+if(Test-Path $OPCSCollectionsFile)
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Initialization" -Description "Loading collections list from $OPCSCollectionsFile" -Level 4
+    $OPCSCollections = Get-Content $OPCSCollectionsFile
+}
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Collection list file not found." -Level 3
+    Throw "Collection list file not found."
+}
+
+# Load the Exclude Peer Cache Source File
+[array]$OPCSExcludePCS = @()
+$OPCSExcludePCSFile = $ExcludeFile
+if(Test-Path $OPCSExcludePCSFile)
+{
+    $OPCSExcludePCS = Get-Content $OPCSExcludePCSFile
+}
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Exclusion file not found." -Level 2
+}
+
+# Load the Blacklist Source File
+[array]$OPCSBlacklist = @()
+$OPCSBlacklistFile = $BlacklistFile
+if(Test-Path $OPCSBlacklistFile)
+{
+    $OPCSExcludePCS = Get-Content $OPCSBlacklistFile
+}
+else
+{
+    Write-OPCSLogs -FileLogging:$OPCSLoggingEnabled -LogFilePath $OPCSLogFilePath -Debugging:$OPCSDebugging -Source "Dependency Check" -Description "Blacklist file not found." -Level 2
+}
+#endregion Initialization
 
 ##################
 ## BEGIN SCRIPT ##
