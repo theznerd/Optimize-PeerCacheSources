@@ -78,17 +78,17 @@ param(
     # Path to the Settings.ini file - defaults to $PSScriptRoot\__OPCSSettings.ini
     [Parameter()]
     [string]
-    $SettingsPath="$PSScriptRoot\__OPCSSettings-CO.ini",
+    $SettingsPath="$PSScriptRoot\__OPCSSettings.ini",
 
     # Path to the xml "Database" file - defaults to $PSScriptRoot\__OPCSData.xml
     [Parameter()]
     [string]
-    $DataPath="$PSScriptRoot\__OPCSData-CO.xml",
+    $DataPath="$PSScriptRoot\__OPCSData.xml",
 
     # Path to the Boundary Collection file - defaults to $PSScriptRoot\_BoundaryCollectionNames.txt
     [Parameter()]
     [string]
-    $CollectionFile="$PSScriptRoot\_BoundaryCollectionNames-CO.txt",
+    $CollectionFile="$PSScriptRoot\_BoundaryCollectionNames.txt",
 
     # Path to the Blacklisted Devices file - defaults to $PSScriptRoot\_BlacklistedDevices.txt
     [Parameter()]
